@@ -301,11 +301,11 @@ probs <- pred_testImages$z
 if (numberOfClusters > 1)
 {
   prob_test_belong_control1 <- probs[,1]
-  hist(prob_test_belong_control1, cex.axis=1.5)
+  hist(prob_test_belong_control1, cex.axis=1.5, breaks="Sturges")
   testImages_similarToControl1 <- prob_test_belong_control1[prob_test_belong_control1>PROB_IMAGE_BELONG_CONTROL]
 
   prob_test_belong_control2 <- probs[,2]
-  hist(prob_test_belong_control2, cex.axis=1.5)
+  hist(prob_test_belong_control2, cex.axis=1.5, breaks="Sturges")
   testImages_similarToControl2 <- prob_test_belong_control2[prob_test_belong_control2>PROB_IMAGE_BELONG_CONTROL]
 }else
 {
