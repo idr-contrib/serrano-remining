@@ -1,0 +1,31 @@
+---
+title: "Remining images"
+output: html_document
+---
+
+```{r, cache=FALSE}
+library(knitr, quietly=T)
+require(markdown)
+
+plate.list <- c(1,2)
+replicate.list <- c(3,4,5,6,12,18)
+
+for (plate in plate.list)
+{
+  for (replicate in replicate.list)
+  {
+      cat(paste("**STARTING PLATE", plate, "REPLICATE", replicate,"**"))
+      knit_child('individual_pipeline.Rmd', output=file.path(getwd(), 'individual_pipeline.md'))
+      htmlFileName <- file.path(getwd(), paste0('pipeline_plate_',plate,'_rep_',replicate,'.html'))
+      markdownToHTML('individual_pipeline.md', htmlFileName, title=paste0('PLATE_',plate,'_REPLICATE_',replicate))
+  }
+}
+```
+
+- Performance:
+```{r, cache=FALSE}
+proc.time()
+library(pryr)
+mem_used()
+```
+

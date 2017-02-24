@@ -1,0 +1,377 @@
+---
+title: "Re-mining pipeline"
+output: html_document
+---
+
+```{r}
+screen <- "twoPlates"
+channel <- "nucleus-dapi"
+```
+
+> **SCREEN:    `r screen`**
+
+> **CHANNEL:   `r channel`**
+
+> **PLATE:     `r plate`**
+
+> **REPLICATE: `r replicate`**
+
+------------------------------------------------------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------
+
+### **Step 0: Set up the environment management**
+
+------------------------------------------------------------------------------------------------------------------------------
+
+- Screen settings.
+```{r, echo=F}
+if (screen == "mockScreen")
+{
+  INDEX_START_FEATURE_DATA <- 15
+  knitr::opts_chunk$set(fig.width=10, fig.height=8)
+}
+if (screen == "secretionPilot")
+{
+  INDEX_START_FEATURE_DATA <- 16
+  knitr::opts_chunk$set(fig.width=14, fig.height=12)
+}
+if (screen == "twoPlates")
+{
+  INDEX_START_FEATURE_DATA <- 14
+  knitr::opts_chunk$set(fig.width=16, fig.height=14)
+}
+```
+- Load paths.
+```{r, echo=F}
+source("paths.R")
+```
+- Load functions.
+```{r, echo=F}
+# source("libs/mylib_images.R")
+# source("libs/mylib_matrixAlgebra.R")
+# source("libs/mylib_measures.R")
+# source("libs/mylib_plots.R")
+source("libs/mylib_stats.R")
+# source("libs/mylib_utils.R")
+```
+- Load packages.
+```{r, message=F, warning=F, echo=T}
+#library(ggdendro)
+#library(ggplot2)
+#library(gridExtra)
+#library(igraph)
+#library(pheatmap)
+#library(rARPACK)
+#library(e1071)
+#library(kernlab)
+#library(tsne)
+#library(Rtsne)
+#library(caret)
+library(mclust)
+```
+- Define constants.
+```{r, echo=F}
+LABEL_CONTROL_CLASS       <- "notarget"
+LABEL_NO_PHENOTYPE        <- "nophenotype"
+LABEL_CONTROL_TAG         <- "CTRL"
+LABEL_NO_PHENOTYPE_TAG    <- "NO_PH"
+LINKAGE_METHOD_FOR_HCLUST <- "average"
+PROB_IMAGE_BELONG_CONTROL <- 0.7
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+### **Step 1: Feature extraction from images (WND-CHARM)**
+
+------------------------------------------------------------------------------------------------------------------------------
+
+- Data file must have the following column structure:
+    - First part: metadata, where column order is not relevant, except for *class* that must be at the end.
+    - Second part: undetermined number of features from WND-CHARM in any order.
+
+```{r, echo=F}
+dataPath <- file.path(pathTo_data, paste0(screen,"_db_",channel,".txt"))
+data <- read.csv(dataPath, header=T, sep="\t", check.names=F)
+```
+
+- Select plate and replicate:
+```{r}
+data <- subset(data, rep==replicate & Plate==plate)
+if (nrow(data) == 0)
+{
+    cat(paste("There are no images for replicate", replicate, "and plate", plate))
+    knit_exit()
+}
+```
+
+- Standarize naming: TEST CLASS WITH NO PHENOTYPE.
+```{r, echo=F}
+# Elements with no phenotype (from test images) should have as label "NO_PH" and IC=0
+if (length(data[data$specificCMPO==LABEL_NO_PHENOTYPE,]$IC) > 0)
+{
+  data[data$specificCMPO==LABEL_NO_PHENOTYPE,]$IC <- 0
+  levels(data$tag) <- c(levels(data$tag), LABEL_NO_PHENOTYPE_TAG)
+  data[data$specificCMPO==LABEL_NO_PHENOTYPE,]$tag <- LABEL_NO_PHENOTYPE_TAG
+}
+```
+
+- Standarize naming: CONTROL CLASS.
+```{r, echo=F}
+# Those with empty gene are no targeted genes
+if (length(data[data$symbol=="",]$symbol) > 0)
+{
+  data[data$symbol=="",]$symbol <- LABEL_CONTROL_CLASS
+}
+if (nrow(data[data$symbol=="",]) > 0)
+{
+  data[data$symbol==LABEL_CONTROL_CLASS,]$specificName <- LABEL_NO_PHENOTYPE
+  data[data$symbol==LABEL_CONTROL_CLASS,]$specificCMPO <- LABEL_CONTROL_CLASS
+  data[data$symbol==LABEL_CONTROL_CLASS,]$EnsemblID    <- LABEL_CONTROL_CLASS
+  data[data$symbol==LABEL_CONTROL_CLASS,]$IC           <- 0
+  data[data$symbol==LABEL_CONTROL_CLASS,]$tag          <- LABEL_CONTROL_TAG
+  data[data$symbol==LABEL_CONTROL_CLASS,]$class        <- LABEL_CONTROL_CLASS
+}
+```
+
+- Build an unique ID to identify images (*data$id*): **gene_siRNA_well**.
+```{r, echo=F}
+data$id <- paste(data$symbol, data$siRNA, data$Well, sep="_") 
+data <- data[c(ncol(data), 1:(ncol(data)-1))]
+INDEX_START_FEATURE_DATA <- INDEX_START_FEATURE_DATA + 1
+
+colsMetadata <- colnames(data)[1:(INDEX_START_FEATURE_DATA-1)]
+data.metadata <- data[c(colsMetadata[colsMetadata!="class"],colsMetadata[colsMetadata=="class"])]
+data.features <- data[c(INDEX_START_FEATURE_DATA:ncol(data))]
+data <- cbind(data.metadata, data.features)
+rm(data.metadata, data.features)
+```
+
+- Number of images for each siRNA:
+```{r}
+sirna_freq <- as.data.frame(table(data$siRNA))
+colnames(sirna_freq) <- c("siRNA", "#images")
+```
+
+- Identify positive controls:
+```{r}
+positiveControls <- subset(sirna_freq, `#images`>1)$siRNA
+# Remove negative control
+positiveControls <- positiveControls[positiveControls!="103860"]
+# Mark siRNA and gene names
+data[data$siRNA %in% positiveControls,]$id <- paste0(data[data$siRNA %in% positiveControls,]$id,"**********")
+```
+
+- Set colors for plots.
+```{r, echo=F}
+colorCodes <- unique(data[c("id","tag")])
+colnames(colorCodes) <- c("label","tag")
+```
+
+- Structure pointers to adress data:
+```{r, echo=F}
+dataColNames <- colnames(data)
+indexID    <- match("id", dataColNames)
+indexClass <- match("class", dataColNames) 
+indexRangeFeature <- INDEX_START_FEATURE_DATA:ncol(data)
+```
+
+```{r, echo=F}
+# Show first images
+# knitr::kable(data[1:16, c("id","specificCMPO","tag",indexClass,indexRangeFeature)])
+```
+
+> THERE ARE **`r nrow(data)`** IMAGES.
+
+```{r}
+table(data$class)
+table(data$tag)
+table(data$specificCMPO)
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+### **Step 2: Feature selection**
+
+------------------------------------------------------------------------------------------------------------------------------
+
+#### **2.1. Feature initial filtering**
+
+- WND-CHARM features:
+```{r}
+originalFeatures <- data[,indexRangeFeature]
+```
+
+- Remove columns with standard deviation = 0:
+```{r}
+features_noConstants <- stats.remove_standardDeviation0_fromDF(originalFeatures)
+featureNamesToBeSelected <- names(features_noConstants)
+```
+
+- Update data and pointers.
+```{r, echo=F}
+metadata <- data[1:(INDEX_START_FEATURE_DATA-1)]
+features <- data[featureNamesToBeSelected]
+
+data <- data.frame(metadata, features, check.names=F)
+indexRangeFeature <- c((ncol(metadata)+1):ncol(data))
+```
+
+#### **2.2. PCA for feature selection**
+
+```{r, fig.width=20, fig.height=8}
+pca <- prcomp(data[indexRangeFeature], scale.=T, center=T)
+pcaEigenvalues <- pca$sdev^2
+plot(pcaEigenvalues[1:length(pcaEigenvalues)], type="l", main=paste0("VARIANCES 1-",length(pcaEigenvalues)))
+numberOfSelectedFeatures <- 10
+pcaEigenvalues <- pcaEigenvalues[1:numberOfSelectedFeatures]
+abline(v=numberOfSelectedFeatures, col="red")
+```
+
+| Stage                                           | # features                             |
+| ----------------------------------------------- |:--------------------------------------:|
+| After WND-CHARM feature extraction              | `r ncol(originalFeatures)`             |
+| After cleaning constant columns                 | `r ncol(features_noConstants)`         | 
+| After PCA                                       | `r numberOfSelectedFeatures`           |
+|                                                 |                                        | 
+
+- Selected features:
+```{r}
+filteredFeatures <- as.data.frame(pca$x[,1:numberOfSelectedFeatures])
+metadata <- data[1:(INDEX_START_FEATURE_DATA-1)]
+```
+
+- Update data and pointer with the new PCA features:
+```{r}
+data <- data.frame(metadata, filteredFeatures, check.names=F)
+indexRangeFeature <- INDEX_START_FEATURE_DATA:ncol(data)
+```
+
+- Save selected features.
+```{r, echo=F}
+cleanFeaturesFile <- file.path(pathTo_data, paste0(screen,"_db_filteredFeatures_",channel,".txt"))
+write.table(data, file=cleanFeaturesFile, sep="\t", col.names=T, row.names=T, append=F, quote=F)
+```
+
+
+------------------------------------------------------------------------------------------------------------------------------
+
+### **Step 3: Outlier detection and data reduction**
+
+------------------------------------------------------------------------------------------------------------------------------
+
+- Split data into control and test.
+```{r, echo=F}
+controlClass <- subset(data, data$class==LABEL_CONTROL_CLASS)
+testClass    <- subset(data, data$class!=LABEL_CONTROL_CLASS)
+
+rownames(controlClass) <- controlClass$id
+rownames(testClass)    <- testClass$id
+
+controlClassFeatures   <- controlClass[indexRangeFeature]
+testClassFeatures      <- testClass[indexRangeFeature]
+```
+
+> THERE ARE **`r nrow(testClass)`** TEST IMAGES AND **`r nrow(controlClass)`** CONTROL IMAGES.
+
+#### **3.1. Gaussian Mixture Model**
+
+##### **3.1.1. Model for the Control Class**
+
+```{r}
+cc_gmm <- Mclust(controlClassFeatures)
+numberOfClusters <- max(unique(cc_gmm$classification))
+summary(cc_gmm)
+```
+
+- Estimation of the number of clusters for the control class images.
+```{r}
+#plot(cc_gmm, what = "classification")
+plot(cc_gmm$BIC)
+```
+
+> The **best number of clusters** is **`r numberOfClusters`** (given by the peak and the decrease).
+
+##### **3.1.2. Prediction for the test images**
+
+```{r, fig.width=20, fig.height=10}
+pred_testImages <- predict.Mclust(cc_gmm, testClassFeatures)
+probs <- pred_testImages$z
+
+if (numberOfClusters > 1)
+{
+  prob_test_belong_control1 <- probs[,1]
+  hist(prob_test_belong_control1, cex.axis=1.5)
+  testImages_similarToControl1 <- prob_test_belong_control1[prob_test_belong_control1>PROB_IMAGE_BELONG_CONTROL]
+
+  prob_test_belong_control2 <- probs[,2]
+  hist(prob_test_belong_control2, cex.axis=1.5)
+  testImages_similarToControl2 <- prob_test_belong_control2[prob_test_belong_control2>PROB_IMAGE_BELONG_CONTROL]
+}else
+{
+  testImages_similarToControl1 <- numeric() 
+  testImages_similarToControl2 <- numeric()
+}
+```
+
+| TEST IMAGES                                  | # images                                  |
+| -------------------------------------------- |:-----------------------------------------:|
+| Total number of test images                  | `r nrow(testClassFeatures)`               |
+| Number of test images similar to control 1   | `r length(testImages_similarToControl1)`  | 
+| Number of test images similar to control 2   | `r length(testImages_similarToControl2)`  |
+|                                              |                                           | 
+| Number of remaining test images              | `r nrow(testClassFeatures) - (length(testImages_similarToControl1) + length(testImages_similarToControl2))`                                                     | 
+|                                              |                                           | 
+
+
+```{r}
+table(data$class)
+table(data$tag)
+table(data$specificCMPO)
+```
+
+#### **3.2. Data reduction**
+
+- Reject ALL CONTROLS (**-`r nrow(testClassFeatures)`**): 
+
+Starting with **`r nrow(data)`** images (TI + CC)...
+```{r}
+data <- data[data$class!=LABEL_CONTROL_CLASS,]
+```
+... we get **`r nrow(data)`** (TI + CC).
+
+
+```{r}
+table(data$tag)
+table(data$specificCMPO)
+```
+
+- Reject TEST IMAGES close to artefacts (**-`r length(testImages_similarToControl1)`**) or controls (**-`r length(testImages_similarToControl2)`**):
+
+Starting with **`r nrow(data)`** images (TI + CC)...
+```{r}
+imagesToReject <- as.factor(c(names(testImages_similarToControl2), names(testImages_similarToControl1)))
+data <- data[!data$id %in% imagesToReject,]
+if (nrow(data) == 0)
+{
+  cat("All images have been detected to be close to artefacts")
+  knit_exit()
+}
+```
+... we get **`r nrow(data)`**.
+
+- Save data.
+```{r, echo=F}
+fileData <- file.path(pathTo_data, paste0(screen,"_db_cleanWeights_cleanArtefacts_dataReduction_",channel,".txt"))
+write.table(data, file=fileData, sep="\t", col.names=F, row.names=T, append=F, quote=F)
+```
+
+> THERE ARE **`r sum(data$class=="target")`** TEST IMAGES.
+
+
+- Performance:
+```{r, cache=FALSE}
+proc.time()
+library(pryr)
+mem_used()
+```
