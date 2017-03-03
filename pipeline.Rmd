@@ -1,0 +1,457 @@
+---
+title: "Re-mining pipeline"
+output: html_document
+---
+
+```{r, echo=F, warning=F}
+screen <- "twoPlates"
+channel <- "nucleus-dapi"
+```
+
+> **SCREEN:    `r screen`**
+
+> **CHANNEL:   `r channel`**
+
+------------------------------------------------------------------------------------------------------------------------------
+
+### **Step 0: Set up the environment management**
+
+------------------------------------------------------------------------------------------------------------------------------
+
+- Screen settings.
+```{r, echo=F}
+if (screen == "mockScreen")
+{
+  INDEX_START_FEATURES <- 15
+}
+if (screen == "secretionPilot")
+{
+  INDEX_START_FEATURES <- 16
+}
+if (screen == "twoPlates")
+{
+  INDEX_START_FEATURES <- 14
+}
+```
+
+- Load constants, paths and functions.
+```{r, echo=F, message=F, warning=F}
+source("includes/includeConstants.R")
+source("includes/includePaths.R")
+source("includes/includeFunctions.R")
+library(ggplot2, quietly=T)
+library(plotly, quietly=T)
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+### **Step 1: Feature extraction from images (WND-CHARM)**
+
+------------------------------------------------------------------------------------------------------------------------------
+
+- Data file must have the following column structure:
+    - First part: metadata, where column order is not relevant, except for *class* that must be at the end.
+    - Second part: undetermined number of features from WND-CHARM in any order.
+
+```{r, echo=F}
+dataPath <- file.path(pathTo_data, paste0(screen,"_db_",channel,".txt"))
+data <- read.csv(dataPath, header=T, sep="\t", check.names=F)
+```
+
+- Standardize naming: TEST CLASS WITH NO PHENOTYPE.
+```{r, echo=F}
+# Elements with no phenotype (from test images) should have as label "NO_PH" and IC=0
+if (length(data[data$specificCMPO==LABEL_NO_PHENOTYPE,]$IC) > 0)
+{
+    data[data$specificCMPO==LABEL_NO_PHENOTYPE,]$IC <- 0
+    levels(data$tag) <- c(levels(data$tag), LABEL_NO_PHENOTYPE_TAG)
+    data[data$specificCMPO==LABEL_NO_PHENOTYPE,]$tag <- LABEL_NO_PHENOTYPE_TAG
+}
+```
+
+- Standardize labels: CONTROL CLASS.
+```{r, echo=F}
+# Those with empty gene are no-targeted genes
+if (length(data[data$symbol=="",]$symbol) > 0)
+{
+    data[data$symbol=="",]$symbol <- LABEL_CONTROL_CLASS
+}
+```
+
+- Detect the appropiate controls.
+```{r, message=F, echo=F}
+# Real controls
+controlSiRNA <- c("103860","251283","scramble")
+# There are controls in the dataset that are not controls
+markedAsControlsInTheDataset <- data[data$class==LABEL_CONTROL_CLASS,]
+# Those siRNA that are NOT in the real controls will be removed
+wrongControls <- subset(markedAsControlsInTheDataset, !(siRNA %in% controlSiRNA))
+# Remove wrong controls from the dataset
+data <- utils.differenceOfDataFrames(data, wrongControls)
+```
+
+- Standardize data: CONTROL CLASS.
+```{r, echo=F}
+if (nrow(data[data$symbol=="",]) > 0)
+{
+    data[data$symbol==LABEL_CONTROL_CLASS,]$specificName <- LABEL_NO_PHENOTYPE
+    data[data$symbol==LABEL_CONTROL_CLASS,]$specificCMPO <- LABEL_CONTROL_CLASS
+    data[data$symbol==LABEL_CONTROL_CLASS,]$EnsemblID    <- LABEL_CONTROL_CLASS
+    data[data$symbol==LABEL_CONTROL_CLASS,]$IC           <- 0
+    data[data$symbol==LABEL_CONTROL_CLASS,]$tag          <- LABEL_CONTROL_TAG
+    data[data$symbol==LABEL_CONTROL_CLASS,]$class        <- LABEL_CONTROL_CLASS
+}
+```
+
+- Build an unique ID to identify images (*data$id*): **gene_siRNA_plate_replicate_well**.
+```{r, echo=F}
+data$id <- paste(data$symbol, data$siRNA, data$Plate, data$rep, data$Well, sep="_") 
+data <- data[c(ncol(data), 1:(ncol(data)-1))]
+INDEX_START_FEATURES <- INDEX_START_FEATURES + 1
+
+colsMetadata <- colnames(data)[1:(INDEX_START_FEATURES-1)]
+data.metadata <- data[c(colsMetadata[colsMetadata!="class"],colsMetadata[colsMetadata=="class"])]
+data.features <- data[c(INDEX_START_FEATURES:ncol(data))]
+data <- cbind(data.metadata, data.features)
+rm(data.metadata, data.features)
+```
+
+- Number of images for each siRNA.
+```{r, echo=F}
+sirna_freq <- as.data.frame(table(data$siRNA))
+colnames(sirna_freq) <- c("siRNA", "#images")
+```
+
+- Identify positive controls with id + "**********".
+```{r, echo=F}
+positiveControls <- subset(sirna_freq, `#images`>5)$siRNA
+# Remove negative controls
+positiveControls <- positiveControls[positiveControls!="103860"]
+# Mark siRNA and gene names
+data[data$siRNA %in% positiveControls,]$id <- paste0(data[data$siRNA %in% positiveControls,]$id,"**********")
+```
+
+- Save data.
+```{r, echo=F}
+standardizedDataPath <- file.path(pathTo_data, paste0(screen,"_standardized_db_",channel,".txt"))
+write.table(data, file=standardizedDataPath, sep="\t", col.names=T, row.names=T, append=F, quote=F)
+```
+
+- Set colors for plots.
+```{r, echo=F}
+colorCodes <- unique(data[c("id","tag")])
+colnames(colorCodes) <- c("label","tag")
+```
+
+- Structure pointers to adress data.
+```{r, echo=F}
+dataColNames <- colnames(data)
+indexID      <- match("id", dataColNames)
+indexClass   <- match("class", dataColNames) 
+indexRangeFeature <- INDEX_START_FEATURES:ncol(data)
+```
+
+> THERE ARE **`r nrow(data)`** IMAGES.
+
+```{r, echo=F}
+table(data$class)
+table(data$tag)
+table(data$specificCMPO)
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+### **Step 2: Feature selection**
+
+------------------------------------------------------------------------------------------------------------------------------
+
+#### **2.1. Initial filtering of the features**
+
+- Select only the WND-CHARM features (without metadata).
+```{r, echo=F}
+originalFeatures <- data[,indexRangeFeature]
+```
+
+- Remove constant columns (standard deviation=0).
+```{r, echo=F}
+features_noConstants <- stats.remove_constantColumns_fromDF(originalFeatures)
+featureNamesToBeSelected <- names(features_noConstants)
+```
+
+- Update data and pointers.
+```{r, echo=F}
+metadata <- data[1:(INDEX_START_FEATURES-1)]
+features <- data[featureNamesToBeSelected]
+
+data <- data.frame(metadata, features, check.names=F)
+indexRangeFeature <- c((ncol(metadata)+1):ncol(data))
+```
+
+#### **2.2. PCA for feature selection**
+
+- Remove positive controls before PCA.
+```{r, echo=F}
+data <- data[!(data$siRNA %in% positiveControls),]
+```
+
+- Principal Component Analysis.
+```{r, echo=F}
+pca <- prcomp(data[indexRangeFeature], scale.=T, center=T)
+```
+
+- Eigenvalues of the PCs.
+```{r, echo=F}
+pcaEigenvalues <- pca$sdev^2
+```
+
+- Select the number of eigenvalues given by the elbow.
+```{r, echo=F}
+numberOfSelectedFeatures <- stats.get_elbow_ofDistribution(1:length(pcaEigenvalues), pcaEigenvalues)
+```
+
+- Plot eigenvalues.
+```{r, fig.height=4, fig.width=8, message=F, echo=F}
+plotEigenvalues <- as.data.frame(pcaEigenvalues)
+plotEigenvalues$eigenvalue <- 1:length(pcaEigenvalues)
+colnames(plotEigenvalues)[1] <- "value"
+
+library(viridis)
+g <- ggplot(plotEigenvalues, aes(x=eigenvalue, y=value))
+g <- g + geom_point(shape=20, size=1)
+g <- g + geom_vline(xintercept=numberOfSelectedFeatures, colour="red")
+g <- g + ggtitle(paste0("VARIANCES [1, ",nrow(plotEigenvalues),"]"))
+g <- g + scale_color_viridis(name="", discrete=T, end=0, begin=1)
+g <- g + theme_bw()
+ggplotly(g)
+
+pcaEigenvalues <- pcaEigenvalues[1:numberOfSelectedFeatures]
+```
+
+| Stage                                           | # features                        |
+| ----------------------------------------------- |:---------------------------------:|
+| After WND-CHARM feature extraction              | `r ncol(originalFeatures)`        |
+| After cleaning constant columns                 | `r ncol(features_noConstants)`    | 
+| After PCA                                       | `r numberOfSelectedFeatures`      |
+|                                                 |                                   | 
+
+- Select `r numberOfSelectedFeatures` PCA features.
+```{r, echo=F}
+filteredFeatures <- as.data.frame(pca$x[,1:numberOfSelectedFeatures])
+metadata <- data[1:(INDEX_START_FEATURES-1)]
+```
+
+- Update data and pointer with the new PCA features.
+```{r, echo=F}
+data <- data.frame(metadata, filteredFeatures, check.names=F)
+indexRangeFeature <- INDEX_START_FEATURES:ncol(data)
+```
+
+- Save `r numberOfSelectedFeatures` PCA features.
+```{r, echo=F}
+PCAfeaturesFile <- file.path(pathTo_PCAs, paste0(screen,"_db_PCAs_",channel,".txt"))
+write.table(data, file=PCAfeaturesFile, sep="\t", col.names=T, row.names=T, append=F, quote=F)
+```
+
+- Save PCA loadings.
+```{r, echo=F}
+loadingFile <- file.path(pathTo_PCAs, paste0(screen,"_PCAloadings_",channel,".txt"))
+write.table(pca$rotation[,1:numberOfSelectedFeatures], file=loadingFile, sep="\t", col.names=T, row.names=T, append=F, quote=F)
+```
+
+------------------------------------------------------------------------------------------------------------------------------
+
+### **Step 3: Quality control**
+
+------------------------------------------------------------------------------------------------------------------------------
+
+- Split data into control and test.
+```{r, echo=F}
+controlClass <- subset(data, data$class==LABEL_CONTROL_CLASS)
+testClass    <- subset(data, data$class!=LABEL_CONTROL_CLASS)
+
+rownames(controlClass) <- controlClass$id
+rownames(testClass)    <- testClass$id
+
+controlClassFeatures   <- controlClass[indexRangeFeature]
+testClassFeatures      <- testClass[indexRangeFeature]
+```
+
+> THERE ARE **`r nrow(testClass)`** TEST IMAGES AND **`r nrow(controlClass)`** CONTROL IMAGES.
+
+#### **3.1. Control Class definition (CC)**
+
+- Distance between the control class images.
+```{r}
+covMatrix <- diag(pcaEigenvalues)
+distControlImagesToCC <- mahalanobis(controlClassFeatures, colMeans(controlClassFeatures), covMatrix, tol=1e-20, inverted=F) # inverted=F when the cov matrix is not inverted outside
+```
+
+- Find a threshold distance with **25%** chance of missing a control.
+
+```{r}
+# Mahalanobis distance (d^2) is Chi-squared distributed.
+percControlsRejected <- 25
+alpha <- percControlsRejected/100
+degreesOfFreedom <- numberOfSelectedFeatures
+t <- qchisq(alpha, df=degreesOfFreedom, lower.tail=F)
+```
+
+> THRESHOLD DISTANCE = **`r t`**
+
+- Select the control images outside of the control boundaries.
+```{r, echo=F}
+controlImages_farFromControls <- distControlImagesToCC[distControlImagesToCC>t]
+```
+
+| CONTROL IMAGES                                 | # images                               |
+| --------------------------------------------|:-----------------------------------------:|
+| Total number of control images              | `r nrow(controlClass)`                    |
+| Number of control images far from the CC    | `r length(controlImages_farFromControls)` |
+|                                             |                                           |
+| **Number of remaining control images**      | **`r nrow(controlClass) -length(controlImages_farFromControls)`**     |
+|                                             |                                           |
+
+- Update the CC to have only those controls images close to the center of the CC.
+```{r, echo=F}
+controlClass <- controlClass[!(controlClass$id %in% names(controlImages_farFromControls)),]
+controlClassFeatures <- controlClass[indexRangeFeature]
+```
+
+#### **3.2. Distance of Test Images to the Control Class**
+
+- Mahalanobis distance of the test images to CC (note that this control class has been updated).
+```{r, echo=F, message=F}
+distTestImagesToCC <- mahalanobis(testClassFeatures, colMeans(controlClassFeatures), covMatrix, tol=1e-20, inverted=F)
+```
+
+- Reject test images with the Mahalanobis distance within the boundaries of the CC.
+```{r, echo=F}
+testImages_similarToControls <- distTestImagesToCC[distTestImagesToCC<=t]
+```
+
+| TEST IMAGES                                 | # images                                  |
+| --------------------------------------------|:-----------------------------------------:|
+| Total number of test images                 | `r nrow(testClassFeatures)`               |
+| Number of test images similar to controls   | `r length(testImages_similarToControls)`  |
+|                                             |                                           |
+| **Number of remaining test images**         | **`r nrow(testClassFeatures)-length(testImages_similarToControls)`**                           |
+|                                             |                                           |
+
+#### **3.3. Histograms of control and test images**
+
+```{r, fig.height=3, fig.width=9, message=F, echo=F}
+library(viridis)
+g <- qplot(distControlImagesToCC, binwidth=1, xlab="Distance of the control images to the center of the Control Class")
+g <- g + geom_vline(xintercept=t, colour="green")
+g <- g + scale_color_viridis(name="", discrete=T, end=0, begin=1)
+g <- g + theme_bw()
+ggplotly(g)
+
+g <- qplot(distTestImagesToCC, binwidth=10, xlab="Distance of the test images to the center of the Control Class")
+g <- g + geom_vline(xintercept=t, colour="green")
+g <- g + scale_color_viridis(name="", discrete=T, end=0, begin=1)
+g <- g + theme_bw()
+ggplotly(g)
+```
+
+#### **3.4. Data reduction**
+
+- Reject ALL CONTROLS (**-`r nrow(controlClassFeatures)`**): 
+
+Starting with **`r nrow(data)`** images (TI + CC)...
+```{r}
+data <- data[data$class!=LABEL_CONTROL_CLASS,]
+```
+... we get **`r nrow(data)`** (TI + CC).
+
+```{r, echo=F}
+table(data$tag)
+```
+
+- Reject TEST IMAGES close to controls (**-`r length(testImages_similarToControls)`**):
+Starting with **`r nrow(data)`** images (TI + CC)...
+```{r}
+testImagesToReject <- as.factor(names(testImages_similarToControls))
+data <- data[!data$id %in% testImagesToReject,]
+```
+... we get **`r nrow(data)`**.
+
+```{r, echo=F}
+table(data$tag)
+```
+
+- Reproducibility:
+Starting with **`r nrow(data)`** images (TI + CC)...
+```{r}
+X <- 2
+data <- images.remove_siRNAWithLessThanXImagesLeft(data, X)
+```
+... we get **`r nrow(data)`**.
+
+```{r, echo=F}
+table(data$tag)
+utils.sort_vector(table(data$specificName))
+```
+
+- Save data.
+```{r, echo=F}
+fileData <- file.path(pathTo_QC, paste0(screen,"_db_qualityControlled.txt"))
+write.table(data, file=fileData, sep="\t", col.names=F, row.names=T, append=F, quote=F)
+```
+
+#### **3.5. Plot the remaining images on the first two PCs.**
+
+```{r, fig.height=10, fig.width=10, echo=F}
+library(viridis)
+g <- ggplot(data, aes(x=PC1, y=PC2, color=tag, text=id))
+g <- g + geom_point(shape=20, size=1.5)
+g <- g + scale_color_viridis(name="", discrete=T, end=0, begin=1)
+g <- g + theme_bw()
+ggplotly(g)
+```
+
+### **Step 4: Similarity between images**
+
+- Cosine similarity between PCA features of the test images.
+```{r, echo=F}
+features <- data[c(INDEX_START_FEATURES:ncol(data))]
+```
+
+- Similarity matrix.
+```{r, echo=F, warning=F, message=F}
+simMatrix <- measures.get_cosineSimilarityMatrix(features)
+rownames(simMatrix) <- colnames(simMatrix) <- data$id
+```
+
+- Reorder matrix by gene to have them together in the heat map.
+```{r, echo=F}
+newOrder  <- rownames(simMatrix)[order(rownames(simMatrix))]
+simMatrix <- simMatrix[newOrder, newOrder]
+```
+
+- Save heat map of the similarity matrix between images.
+```{r, echo=F, warning=F, message=F}
+simList <- utils.convert_MatrixToListOfPairs(simMatrix)
+
+library(viridis)
+gg <- ggplot(simList, aes(x=X1, y=X2, fill=value))
+gg <- gg + geom_tile(color="white", size=0.15)
+gg <- gg + scale_fill_viridis(name="similarity")
+gg <- gg + coord_equal()
+gg <- gg + labs(x=NULL, y=NULL)
+gg <- gg + theme(axis.text.x = element_text(angle=90, hjust=1))
+gg <- gg + theme(axis.ticks=element_blank())
+gg <- gg + theme(axis.text=element_text(size=7))
+gg <- gg + theme(legend.title=element_text(size=12))
+gg <- gg + theme(legend.text=element_text(size=10))
+ggplotly(gg, width=1000, height=1000)
+
+ggsave(gg, width=20, height=20, filename=file.path(pathTo_plots,"cosineSimilarityBetweenImages.pdf"))
+```
+
+- Performance:
+```{r, cache=FALSE, echo=F}
+proc.time()
+library(pryr)
+mem_used()
+```
