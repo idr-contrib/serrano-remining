@@ -1,3 +1,8 @@
+args = commandArgs(trailingOnly=TRUE)
+if (length(args)!=1) {
+  stop("One argument required (h5-file)", call.=FALSE)
+}
+
 #### 1) Install and load *rhdf5*
 if (!("rhdf5" %in% rownames(installed.packages())))
 {
@@ -8,7 +13,7 @@ if (!("rhdf5" %in% rownames(installed.packages())))
 library(rhdf5)
 
 #### 2) Explore the structure
-filename <- file.path("..","h5files","plate1_1_013.h5")
+filename <- args[1]
 fields <- h5ls(filename)
 str(fields)
 
