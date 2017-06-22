@@ -90,6 +90,7 @@ featureMatrix <- featureMatrix[,-1]
 
 # Remove constant features
 featureMatrix <- featureMatrix[, which(!apply(featureMatrix, 2, FUN=function(x) {sd(x)==0}))]
+rm(fields, group_name, h5data, measures, imageID, wellID, listOfFeatureMatrices)
 
 # PCA
 pca <- prcomp(featureMatrix, scale.= TRUE, center = TRUE)
