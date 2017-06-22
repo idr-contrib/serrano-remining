@@ -1,0 +1,15 @@
+install.packages(c(
+  "ggplot2",
+  "knitr",
+  "lsa",
+  "mclust",
+  "optparse",
+  "plotly",
+  "proxy",
+  "pryr",
+  "reshape",
+  "sysfonts",
+  "viridis",
+  "xkcd"))
+source("http://bioconductor.org/biocLite.R")
+biocLite("rhdf5")
