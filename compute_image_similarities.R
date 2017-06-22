@@ -86,7 +86,10 @@ row.names(featureMatrix) <- imageID
 # We average all rows from the same image
 featureMatrix <- aggregate(featureMatrix, by = list(row.names(featureMatrix)), mean)
 rownames(featureMatrix) <- featureMatrix[,1]
-featureMatrix <- featureMatrix[,-1]
+
+nImages <- nrow(featureMatrix) # 388372950 images
+randomSetSize <- 0.01*nImages
+featureMatrix <- featureMatrix[sample(nrow(featureMatrix), randomSetSize), ]
 
 # Remove constant features
 featureMatrix <- featureMatrix[, which(!apply(featureMatrix, 2, FUN=function(x) {sd(x)==0}))]
